@@ -3,10 +3,11 @@ name: KPUW Slot Monitor
 on:
   workflow_dispatch:
   schedule:
-    # Будні (Пн-Пт): запускається о 06:00 UTC (07:00/08:00 у Польщі)
-    - cron: '0 6 * * 1-5'
-    # Друга сесія о 09:30 UTC (10:30/11:30 у Польщі)
-    - cron: '30 9 * * 1-5'
+    # Польща зараз живе за зимовим часом (UTC+1).
+    # Сесія 1: 07:00 UTC = 08:00 ранку в Польщі (працює 4.5 год: до 12:30)
+    - cron: '0 7 * * 1-5'
+    # Сесія 2: 11:30 UTC = 12:30 дня в Польщі (працює 4.5 год: до 17:00)
+    - cron: '30 11 * * 1-5'
 
 jobs:
   monitor:
@@ -33,6 +34,6 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           CHECK_INTERVAL_SECONDS: 45
-          MAX_RUNTIME_MINUTES: 210
+          MAX_RUNTIME_MINUTES: 270 # 4.5 години безперервного моніторингу
         run: |
           python monitor.py

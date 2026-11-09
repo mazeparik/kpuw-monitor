@@ -8,17 +8,27 @@ from playwright.sync_api import sync_playwright
 
 load_dotenv()
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8679764400:AAE4RS7dJre_fRdkpBEgrrpicfLSiRAVSCo")
-RAW_CHAT_IDS = os.getenv("TELEGRAM_CHAT_ID", "6426530276, 6764361976")
+# Отримуємо токен (з захистом від порожнього рядка з Secrets та префіксу "bot")
+raw_token = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+if not raw_token:
+    raw_token = "8679764400:AAE4RS7dJre_fRdkpBEgrrpicfLSiRAVSCo"
+if raw_token.startswith("bot"):
+    raw_token = raw_token[3:]
+TELEGRAM_BOT_TOKEN = raw_token
+
+RAW_CHAT_IDS = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
+if not RAW_CHAT_IDS:
+    RAW_CHAT_IDS = "6426530276, 6764361976"
+
 CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "45"))
 TARGET_URL = os.getenv("TARGET_URL", "https://uw.bezkolejki.eu/kpuw_bydgoszcz/Reservation")
 
 # Отримувачі (розділені комою)
 CHAT_IDS = [cid.strip() for cid in RAW_CHAT_IDS.replace(";", ",").split(",") if cid.strip()]
 
+
 def get_poland_time() -> datetime.datetime:
     now_utc = datetime.datetime.now(datetime.timezone.utc)
-    # Зимовий час (листопад-березень) = UTC+1, літній = UTC+2
     is_summer = 4 <= now_utc.month <= 9 or (now_utc.month == 3 and now_utc.day >= 25) or (now_utc.month == 10 and now_utc.day < 25)
     offset_hours = 2 if is_summer else 1
     return now_utc.astimezone(datetime.timezone(datetime.timedelta(hours=offset_hours)))
@@ -43,7 +53,7 @@ def send_telegram_message(text: str, disable_preview: bool = True):
             if resp.status_code == 200:
                 log(f"✅ Сповіщення надіслано користувачу {chat_id}")
             else:
-                log(f"ℹ️ Статус надсилання для {chat_id}: {resp.status_code} ({resp.json().get('description', '')})")
+                log(f"ℹ️ Статус надсилання для {chat_id}: {resp.status_code} ({resp.text})")
         except Exception as e:
             log(f"❌ Помилка Telegram ({chat_id}): {e}")
 
@@ -62,16 +72,17 @@ def send_telegram_alert(dates: list):
 def run_monitor():
     pl_now = get_poland_time()
     log("🚀 Ініціалізація KPUW Slot Monitor...")
+    log(f"🔑 Bot Token довжина: {len(TELEGRAM_BOT_TOKEN)} символів (початок: {TELEGRAM_BOT_TOKEN[:6]}...)")
     log(f"👥 Список отримувачів: {CHAT_IDS}")
     log(f"🕒 Час у Польщі: {pl_now.strftime('%H:%M:%S')} ({pl_now.strftime('%A')})")
 
-    # Якщо скрипт запущено в неробочий час (ніч або вихідний)
     is_outside_working_hours = (pl_now.weekday() >= 5) or (pl_now.hour < 8 or pl_now.hour >= 17)
 
     if is_outside_working_hours:
         log("🌙 Зараз неробочий час у Польщі (робочий графік: Пн-Пт 08:00–17:00).")
         log("🧪 Виконуємо 1 разову тестову перевірку сайту KPUW для діагностики...")
 
+        site_status = "невідомо"
         with sync_playwright() as p:
             browser = p.chromium.launch(
                 headless=True,
@@ -79,29 +90,33 @@ def run_monitor():
             )
             page = browser.new_page()
             try:
-                page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=20000)
-                page.wait_for_selector(".select-card", timeout=10000)
+                page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=30000)
+                log(f"Сторінка відкрилась: '{page.title()}', URL: {page.url}")
+
+                # Очікуємо появи карток (до 20 сек для повільного з'єднання)
+                page.wait_for_selector(".select-card", timeout=20000)
                 card = page.locator(".select-card", has_text="Odciski palców")
                 found = card.count() > 0
-                log(f"Тест сайту: картку знайдено = {found}")
+                log(f"Тест сайту: знайдено картку 'Odciski palców' = {found}")
+                site_status = "✅ Сайт KPUW доступний, картка черги знайдена"
             except Exception as e:
-                found = False
                 log(f"Тест сайту: помилка = {e}")
+                log(f"Заголовок: '{page.title()}', текст: {page.inner_text('body')[:200] if page else 'немає'}")
+                site_status = f"⚠️ Помилка завантаження: {e}"
             finally:
                 browser.close()
 
         test_msg = (
-            "🧪 *[KPUW Monitor] Тестова перевірка успішна!*\n\n"
-            "✅ Зв'язок із ботом працює чудово.\n"
-            "✅ Сайт KPUW відкривається, картка черги доступна.\n"
-            f"🕒 Зараз неробочий час у Польщі (`{pl_now.strftime('%H:%M')}`).\n\n"
-            "⏰ *Автоматичний моніторинг сам увімкнеться завтра о 08:00 ранку за польським часом!*"
+            "🧪 *[KPUW Monitor] Діагностичне сповіщення*\n\n"
+            f"{site_status}\n"
+            f"🕒 Поточний польський час: `{pl_now.strftime('%H:%M')}`\n\n"
+            "⏰ *Автоматичний моніторинг черги увімкнеться за розкладом о 08:00 ранку!*"
         )
         send_telegram_message(test_msg)
-        log("🏁 Тестова перевірка завершена. Очікуємо 08:00 за розкладом.")
+        log("🏁 Тестова перевірка завершена.")
         return
 
-    # --- Якщо зараз робочий час (08:00 - 17:00) ---
+    # Робочий час (08:00 - 17:00)
     startup_msg = (
         "🟢 *[KPUW Monitor] Моніторинг черги розпочато!*\n\n"
         "🏛 *Ужонд:* KPUW Bydgoszcz (Odciski palców)\n"
@@ -150,7 +165,7 @@ def run_monitor():
         while True:
             current_pl = get_poland_time()
             if current_pl.hour >= 17 or current_pl.hour < 8:
-                log(f"⏹️ Настав час завершення ({current_pl.strftime('%H:%M')} PL). Зупинка скрипта до наступного ранку 08:00.")
+                log(f"⏹️ Настав час завершення ({current_pl.strftime('%H:%M')} PL). Зупинка скрипта до 08:00.")
                 stop_msg = (
                     "🔴 *[KPUW Monitor] Робочий день завершено.*\n\n"
                     f"🕒 Польський час: `{current_pl.strftime('%H:%M')}`.\n"
@@ -163,8 +178,8 @@ def run_monitor():
             detected_days = []
             log(f"--- Перевірка #{check_count} ---")
             try:
-                page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=20000)
-                page.wait_for_selector(".select-card", timeout=10000)
+                page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=30000)
+                page.wait_for_selector(".select-card", timeout=15000)
 
                 card = page.locator(".select-card", has_text="Odciski palców")
                 if card.count() > 0:

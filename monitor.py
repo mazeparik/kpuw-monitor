@@ -8,27 +8,31 @@ from playwright.sync_api import sync_playwright
 
 load_dotenv()
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-RAW_CHAT_IDS = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8679764400:AAE4RS7dJre_fRdkpBEgrrpicfLSiRAVSCo")
+RAW_CHAT_IDS = os.getenv("TELEGRAM_CHAT_ID", "6426530276, 6764361976")
 CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "45"))
 TARGET_URL = os.getenv("TARGET_URL", "https://uw.bezkolejki.eu/kpuw_bydgoszcz/Reservation")
-MAX_RUNTIME_MINUTES = int(os.getenv("MAX_RUNTIME_MINUTES", "0"))  # 0 = без обмежень
 
-# Підтримка декількох ID через кому: "123456, 789012"
+# Отримувачі (розділені комою)
 CHAT_IDS = [cid.strip() for cid in RAW_CHAT_IDS.replace(";", ",").split(",") if cid.strip()]
 
-if not TELEGRAM_BOT_TOKEN or not CHAT_IDS:
-    print("❌ Помилка: Вкажіть TELEGRAM_BOT_TOKEN та TELEGRAM_CHAT_ID у .env або GitHub Secrets")
-    sys.exit(1)
+# Часовий пояс Польщі (взимку CET = UTC+1, влітку CEST = UTC+2)
+# Автоматичне визначення зміщення для Варшави
+def get_poland_time() -> datetime.datetime:
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    # З останньої неділі березня по останню неділю жовтня - літній час (UTC+2), інакше зимовий (UTC+1)
+    # Для простоти і надійності: листопад - березень = UTC+1
+    is_summer = 4 <= now_utc.month <= 9 or (now_utc.month == 3 and now_utc.day >= 25) or (now_utc.month == 10 and now_utc.day < 25)
+    offset_hours = 2 if is_summer else 1
+    return now_utc.astimezone(datetime.timezone(datetime.timedelta(hours=offset_hours)))
 
 
 def log(msg: str):
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{timestamp}] {msg}", flush=True)
+    pl_time = get_poland_time().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{pl_time} PL] {msg}", flush=True)
 
 
 def send_telegram_message(text: str, disable_preview: bool = True):
-    """Надсилає повідомлення всім зазначеним Chat ID."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     for chat_id in CHAT_IDS:
         payload = {
@@ -42,9 +46,9 @@ def send_telegram_message(text: str, disable_preview: bool = True):
             if resp.status_code == 200:
                 log(f"✅ Сповіщення надіслано користувачу {chat_id}")
             else:
-                log(f"⚠️ Telegram помилка для {chat_id}: {resp.text}")
+                log(f"ℹ️ Статус надсилання для {chat_id}: {resp.status_code} ({resp.json().get('description', '')})")
         except Exception as e:
-            log(f"❌ Помилка надсилання в Telegram ({chat_id}): {e}")
+            log(f"❌ Помилка Telegram ({chat_id}): {e}")
 
 
 def send_telegram_alert(dates: list):
@@ -59,23 +63,31 @@ def send_telegram_alert(dates: list):
 
 
 def run_monitor():
-    log("🚀 Запуск моніторингу черги KPUW Bydgoszcz...")
-    log(f"👥 Отримувачі сповіщень: {CHAT_IDS}")
-    log(f"🔗 Сторінка: {TARGET_URL}")
-    log(f"⏱️ Інтервал перевірки: {CHECK_INTERVAL_SECONDS} секунд")
-    if MAX_RUNTIME_MINUTES > 0:
-        log(f"⏳ Ліміт часу роботи сесії: {MAX_RUNTIME_MINUTES} хв")
+    pl_now = get_poland_time()
+    log("🚀 Ініціалізація KPUW Slot Monitor...")
+    log(f"👥 Список отримувачів: {CHAT_IDS}")
+    log(f"🕒 Поточний час у Польщі: {pl_now.strftime('%H:%M:%S')} (день тижня: {pl_now.strftime('%A')})")
 
-    # Надсилаємо сповіщення про успішний старт сесії
+    # Перевірка: не працювати на вихідних (Субота=5, Неділя=6)
+    if pl_now.weekday() >= 5:
+        log("⏹️ Сьогодні вихідний день. Ужонд не працює. Моніторинг зупинено.")
+        return
+
+    # Перевірка: робочий діапазон суворо від 08:00 до 17:00 за польським часом
+    if pl_now.hour < 8 or pl_now.hour >= 17:
+        log(f"⏹️ Поточний польський час ({pl_now.strftime('%H:%M')}) поза робочим діапазоном (08:00–17:00). Скрипт не запускається.")
+        return
+
+    # Сповіщення про старт моніторингу
     startup_msg = (
-        "🟢 *[KPUW Monitor] Сесію моніторингу запущено!*\n\n"
+        "🟢 *[KPUW Monitor] Моніторинг черги розпочато!*\n\n"
         "🏛 *Ужонд:* KPUW Bydgoszcz (Odciski palców)\n"
-        f"⏱️ Перевірка кожні {CHECK_INTERVAL_SECONDS} сек.\n"
-        "Щойно з'явиться вільне віконце — миттєво прийде повідомлення!"
+        f"🕒 Польський час: `{pl_now.strftime('%H:%M')}` (робота до 17:00)\n"
+        f"⏱️ Інтервал: кожні {CHECK_INTERVAL_SECONDS} сек.\n\n"
+        "Як тільки з'явиться віконце — сюди миттєво надійде посилання!"
     )
     send_telegram_message(startup_msg)
 
-    start_time = time.time()
     detected_days = []
     last_alerted_days = None
 
@@ -113,24 +125,34 @@ def run_monitor():
 
         check_count = 0
         while True:
-            if MAX_RUNTIME_MINUTES > 0:
-                elapsed_minutes = (time.time() - start_time) / 60
-                if elapsed_minutes >= MAX_RUNTIME_MINUTES:
-                    log(f"🏁 Досягнуто ліміту сесії {MAX_RUNTIME_MINUTES} хв. Завершення.")
-                    break
+            # Сувора перевірка: щойно настає 17:00 за Польщею - негайно зупиняємося
+            current_pl = get_poland_time()
+            if current_pl.hour >= 17 or current_pl.hour < 8:
+                log(f"⏹️ Настав час завершення ({current_pl.strftime('%H:%M')} PL). Зупинка скрипта до наступного ранку 08:00.")
+                stop_msg = (
+                    "🔴 *[KPUW Monitor] Робочий день завершено.*\n\n"
+                    f"🕒 Польський час: `{current_pl.strftime('%H:%M')}`.\n"
+                    "Скрипт вимикається до 08:00 наступного робочого дня."
+                )
+                send_telegram_message(stop_msg)
+                break
 
             check_count += 1
             detected_days = []
             log(f"--- Перевірка #{check_count} ---")
             try:
-                page.goto(TARGET_URL, wait_until="networkidle", timeout=30000)
+                # Використовуємо domcontentloaded (не зависає на фонових з'єднаннях)
+                page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=20000)
+
+                # Чекаємо появи карток на сторінці
+                page.wait_for_selector(".select-card", timeout=10000)
 
                 card = page.locator(".select-card", has_text="Odciski palców")
                 if card.count() > 0:
                     card.first.click()
                     page.wait_for_timeout(4000)
                 else:
-                    log("⚠️ Картку 'Odciski palców' не знайдено на сторінці.")
+                    log("⚠️ Картку 'Odciski palców' не знайдено.")
 
                 if detected_days:
                     log(f"🔥 ЗНАЙДЕНО ВІЛЬНІ МІСЦЯ: {detected_days}")

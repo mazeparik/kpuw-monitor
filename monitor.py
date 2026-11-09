@@ -9,12 +9,15 @@ from playwright.sync_api import sync_playwright
 load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+RAW_CHAT_IDS = os.getenv("TELEGRAM_CHAT_ID", "")
 CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "45"))
 TARGET_URL = os.getenv("TARGET_URL", "https://uw.bezkolejki.eu/kpuw_bydgoszcz/Reservation")
 MAX_RUNTIME_MINUTES = int(os.getenv("MAX_RUNTIME_MINUTES", "0"))  # 0 = без обмежень
 
-if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+# Підтримка декількох ID через кому: "123456, 789012"
+CHAT_IDS = [cid.strip() for cid in RAW_CHAT_IDS.replace(";", ",").split(",") if cid.strip()]
+
+if not TELEGRAM_BOT_TOKEN or not CHAT_IDS:
     print("❌ Помилка: Вкажіть TELEGRAM_BOT_TOKEN та TELEGRAM_CHAT_ID у .env або GitHub Secrets")
     sys.exit(1)
 
@@ -22,6 +25,26 @@ if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
 def log(msg: str):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {msg}", flush=True)
+
+
+def send_telegram_message(text: str, disable_preview: bool = True):
+    """Надсилає повідомлення всім зазначеним Chat ID."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    for chat_id in CHAT_IDS:
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "Markdown",
+            "disable_web_page_preview": disable_preview,
+        }
+        try:
+            resp = requests.post(url, json=payload, timeout=10)
+            if resp.status_code == 200:
+                log(f"✅ Сповіщення надіслано користувачу {chat_id}")
+            else:
+                log(f"⚠️ Telegram помилка для {chat_id}: {resp.text}")
+        except Exception as e:
+            log(f"❌ Помилка надсилання в Telegram ({chat_id}): {e}")
 
 
 def send_telegram_alert(dates: list):
@@ -32,29 +55,25 @@ def send_telegram_alert(dates: list):
         f"📅 *Доступні дати:* `{dates_str}`\n\n"
         f"👉 [Швидко перейти до бронювання]({TARGET_URL})"
     )
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "parse_mode": "Markdown",
-        "disable_web_page_preview": False,
-    }
-    try:
-        resp = requests.post(url, json=payload, timeout=10)
-        if resp.status_code == 200:
-            log("✅ Сповіщення успішно надіслано в Telegram!")
-        else:
-            log(f"⚠️ Telegram API повернув помилку: {resp.text}")
-    except Exception as e:
-        log(f"❌ Помилка надсилання в Telegram: {e}")
+    send_telegram_message(message, disable_preview=False)
 
 
 def run_monitor():
     log("🚀 Запуск моніторингу черги KPUW Bydgoszcz...")
+    log(f"👥 Отримувачі сповіщень: {CHAT_IDS}")
     log(f"🔗 Сторінка: {TARGET_URL}")
     log(f"⏱️ Інтервал перевірки: {CHECK_INTERVAL_SECONDS} секунд")
     if MAX_RUNTIME_MINUTES > 0:
         log(f"⏳ Ліміт часу роботи сесії: {MAX_RUNTIME_MINUTES} хв")
+
+    # Надсилаємо сповіщення про успішний старт сесії
+    startup_msg = (
+        "🟢 *[KPUW Monitor] Сесію моніторингу запущено!*\n\n"
+        "🏛 *Ужонд:* KPUW Bydgoszcz (Odciski palców)\n"
+        f"⏱️ Перевірка кожні {CHECK_INTERVAL_SECONDS} сек.\n"
+        "Щойно з'явиться вільне віконце — миттєво прийде повідомлення!"
+    )
+    send_telegram_message(startup_msg)
 
     start_time = time.time()
     detected_days = []
@@ -94,11 +113,10 @@ def run_monitor():
 
         check_count = 0
         while True:
-            # Перевірка ліміту часу (для GitHub Actions)
             if MAX_RUNTIME_MINUTES > 0:
                 elapsed_minutes = (time.time() - start_time) / 60
                 if elapsed_minutes >= MAX_RUNTIME_MINUTES:
-                    log(f"🏁 Досягнуто ліміту сесії {MAX_RUNTIME_MINUTES} хв. Завершення поточної ітерації.")
+                    log(f"🏁 Досягнуто ліміту сесії {MAX_RUNTIME_MINUTES} хв. Завершення.")
                     break
 
             check_count += 1
@@ -107,7 +125,6 @@ def run_monitor():
             try:
                 page.goto(TARGET_URL, wait_until="networkidle", timeout=30000)
 
-                # Картка вибору 'Odciski palców'
                 card = page.locator(".select-card", has_text="Odciski palców")
                 if card.count() > 0:
                     card.first.click()
@@ -115,7 +132,6 @@ def run_monitor():
                 else:
                     log("⚠️ Картку 'Odciski palców' не знайдено на сторінці.")
 
-                # Результати
                 if detected_days:
                     log(f"🔥 ЗНАЙДЕНО ВІЛЬНІ МІСЦЯ: {detected_days}")
                     if detected_days != last_alerted_days:

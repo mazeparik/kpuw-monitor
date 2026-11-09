@@ -16,12 +16,9 @@ TARGET_URL = os.getenv("TARGET_URL", "https://uw.bezkolejki.eu/kpuw_bydgoszcz/Re
 # Отримувачі (розділені комою)
 CHAT_IDS = [cid.strip() for cid in RAW_CHAT_IDS.replace(";", ",").split(",") if cid.strip()]
 
-# Часовий пояс Польщі (взимку CET = UTC+1, влітку CEST = UTC+2)
-# Автоматичне визначення зміщення для Варшави
 def get_poland_time() -> datetime.datetime:
     now_utc = datetime.datetime.now(datetime.timezone.utc)
-    # З останньої неділі березня по останню неділю жовтня - літній час (UTC+2), інакше зимовий (UTC+1)
-    # Для простоти і надійності: листопад - березень = UTC+1
+    # Зимовий час (листопад-березень) = UTC+1, літній = UTC+2
     is_summer = 4 <= now_utc.month <= 9 or (now_utc.month == 3 and now_utc.day >= 25) or (now_utc.month == 10 and now_utc.day < 25)
     offset_hours = 2 if is_summer else 1
     return now_utc.astimezone(datetime.timezone(datetime.timedelta(hours=offset_hours)))
@@ -66,19 +63,45 @@ def run_monitor():
     pl_now = get_poland_time()
     log("🚀 Ініціалізація KPUW Slot Monitor...")
     log(f"👥 Список отримувачів: {CHAT_IDS}")
-    log(f"🕒 Поточний час у Польщі: {pl_now.strftime('%H:%M:%S')} (день тижня: {pl_now.strftime('%A')})")
+    log(f"🕒 Час у Польщі: {pl_now.strftime('%H:%M:%S')} ({pl_now.strftime('%A')})")
 
-    # Перевірка: не працювати на вихідних (Субота=5, Неділя=6)
-    if pl_now.weekday() >= 5:
-        log("⏹️ Сьогодні вихідний день. Ужонд не працює. Моніторинг зупинено.")
+    # Якщо скрипт запущено в неробочий час (ніч або вихідний)
+    is_outside_working_hours = (pl_now.weekday() >= 5) or (pl_now.hour < 8 or pl_now.hour >= 17)
+
+    if is_outside_working_hours:
+        log("🌙 Зараз неробочий час у Польщі (робочий графік: Пн-Пт 08:00–17:00).")
+        log("🧪 Виконуємо 1 разову тестову перевірку сайту KPUW для діагностики...")
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+            )
+            page = browser.new_page()
+            try:
+                page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=20000)
+                page.wait_for_selector(".select-card", timeout=10000)
+                card = page.locator(".select-card", has_text="Odciski palców")
+                found = card.count() > 0
+                log(f"Тест сайту: картку знайдено = {found}")
+            except Exception as e:
+                found = False
+                log(f"Тест сайту: помилка = {e}")
+            finally:
+                browser.close()
+
+        test_msg = (
+            "🧪 *[KPUW Monitor] Тестова перевірка успішна!*\n\n"
+            "✅ Зв'язок із ботом працює чудово.\n"
+            "✅ Сайт KPUW відкривається, картка черги доступна.\n"
+            f"🕒 Зараз неробочий час у Польщі (`{pl_now.strftime('%H:%M')}`).\n\n"
+            "⏰ *Автоматичний моніторинг сам увімкнеться завтра о 08:00 ранку за польським часом!*"
+        )
+        send_telegram_message(test_msg)
+        log("🏁 Тестова перевірка завершена. Очікуємо 08:00 за розкладом.")
         return
 
-    # Перевірка: робочий діапазон суворо від 08:00 до 17:00 за польським часом
-    if pl_now.hour < 8 or pl_now.hour >= 17:
-        log(f"⏹️ Поточний польський час ({pl_now.strftime('%H:%M')}) поза робочим діапазоном (08:00–17:00). Скрипт не запускається.")
-        return
-
-    # Сповіщення про старт моніторингу
+    # --- Якщо зараз робочий час (08:00 - 17:00) ---
     startup_msg = (
         "🟢 *[KPUW Monitor] Моніторинг черги розпочато!*\n\n"
         "🏛 *Ужонд:* KPUW Bydgoszcz (Odciski palców)\n"
@@ -125,7 +148,6 @@ def run_monitor():
 
         check_count = 0
         while True:
-            # Сувора перевірка: щойно настає 17:00 за Польщею - негайно зупиняємося
             current_pl = get_poland_time()
             if current_pl.hour >= 17 or current_pl.hour < 8:
                 log(f"⏹️ Настав час завершення ({current_pl.strftime('%H:%M')} PL). Зупинка скрипта до наступного ранку 08:00.")
@@ -141,10 +163,7 @@ def run_monitor():
             detected_days = []
             log(f"--- Перевірка #{check_count} ---")
             try:
-                # Використовуємо domcontentloaded (не зависає на фонових з'єднаннях)
                 page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=20000)
-
-                # Чекаємо появи карток на сторінці
                 page.wait_for_selector(".select-card", timeout=10000)
 
                 card = page.locator(".select-card", has_text="Odciski palców")

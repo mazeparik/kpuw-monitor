@@ -6,37 +6,39 @@ import requests
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 
+# Спроба імпорту звукового сигналу для Windows
+try:
+    import winsound
+    HAS_SOUND = True
+except ImportError:
+    HAS_SOUND = False
+
 load_dotenv()
 
-# Отримуємо токен (з захистом від порожнього рядка з Secrets та префіксу "bot")
-raw_token = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
-if not raw_token:
-    raw_token = "8679764400:AAE4RS7dJre_fRdkpBEgrrpicfLSiRAVSCo"
-if raw_token.startswith("bot"):
-    raw_token = raw_token[3:]
-TELEGRAM_BOT_TOKEN = raw_token
-
-RAW_CHAT_IDS = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
-if not RAW_CHAT_IDS:
-    RAW_CHAT_IDS = "6426530276, 6764361976"
-
-CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "45"))
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8679764400:AAE4RS7dJre_fRdkpBEgrrpicfLSiRAVSCo").strip()
+RAW_CHAT_IDS = os.getenv("TELEGRAM_CHAT_ID", "6426530276, 6764361976, 6315959355").strip()
+CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "40"))
 TARGET_URL = os.getenv("TARGET_URL", "https://uw.bezkolejki.eu/kpuw_bydgoszcz/Reservation")
 
-# Отримувачі (розділені комою)
 CHAT_IDS = [cid.strip() for cid in RAW_CHAT_IDS.replace(";", ",").split(",") if cid.strip()]
 
 
-def get_poland_time() -> datetime.datetime:
-    now_utc = datetime.datetime.now(datetime.timezone.utc)
-    is_summer = 4 <= now_utc.month <= 9 or (now_utc.month == 3 and now_utc.day >= 25) or (now_utc.month == 10 and now_utc.day < 25)
-    offset_hours = 2 if is_summer else 1
-    return now_utc.astimezone(datetime.timezone(datetime.timedelta(hours=offset_hours)))
-
-
 def log(msg: str):
-    pl_time = get_poland_time().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{pl_time} PL] {msg}", flush=True)
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}] {msg}", flush=True)
+
+
+def play_alarm():
+    """Гучний звуковий сигнал на комп'ютері"""
+    if HAS_SOUND:
+        try:
+            for _ in range(5):
+                winsound.Beep(1200, 400)
+                time.sleep(0.1)
+                winsound.Beep(1600, 500)
+                time.sleep(0.1)
+        except Exception:
+            pass
 
 
 def send_telegram_message(text: str, disable_preview: bool = True):
@@ -51,83 +53,63 @@ def send_telegram_message(text: str, disable_preview: bool = True):
         try:
             resp = requests.post(url, json=payload, timeout=10)
             if resp.status_code == 200:
-                log(f"✅ Сповіщення надіслано користувачу {chat_id}")
+                log(f"✅ Сповіщення надіслано на ID {chat_id}")
             else:
-                log(f"ℹ️ Статус надсилання для {chat_id}: {resp.status_code} ({resp.text})")
+                log(f"ℹ️ Статус надсилання для {chat_id}: {resp.status_code}")
         except Exception as e:
             log(f"❌ Помилка Telegram ({chat_id}): {e}")
 
 
-def send_telegram_alert(dates: list):
-    dates_str = ", ".join(str(d) for d in dates)
+def send_slot_alert(details: str = ""):
     message = (
-        f"🚨 *З'явилися вільні терміни на відбитки пальців!* 🚨\n\n"
-        f"🏛 *Ужонд:* KPUW Bydgoszcz\n"
-        f"📅 *Доступні дати:* `{dates_str}`\n\n"
-        f"👉 [Швидко перейти до бронювання]({TARGET_URL})"
+        "🚨🚨🚨 *УВАГА! ВІЛЬНІ МІСЦЯ НА ВІДБИТКИ!* 🚨🚨🚨\n\n"
+        "🏛 *Ужонд:* KPUW Bydgoszcz (Odciski palców)\n"
+        f"⚡️ *Сигнал:* {details}\n\n"
+        f"👉 [ШВИДКО ПЕРЕХОДЬТЕ ДО БРОНЮВАННЯ]({TARGET_URL})\n\n"
+        "⏱️ Відкривайте сайт, проходьте капчу і займайте час!"
     )
     send_telegram_message(message, disable_preview=False)
+    play_alarm()
+
+
+def is_captcha_triggered(page) -> bool:
+    """Перевіряє, чи вискочила на сторінці інтерактивна капча"""
+    try:
+        # Шукаємо bframe (вікно пазлу reCAPTCHA), видимі iframe капчі або модальні вікна
+        selectors = [
+            'iframe[src*="google.com/recaptcha/api2/bframe"]',
+            'iframe[title*="recaptcha"]',
+            'iframe[src*="challenges.cloudflare.com"]',
+            '.g-recaptcha-bubble',
+            'div[style*="visibility: visible"] iframe[src*="recaptcha"]',
+        ]
+        for sel in selectors:
+            loc = page.locator(sel)
+            if loc.count() > 0:
+                for i in range(loc.count()):
+                    if loc.nth(i).is_visible():
+                        return True
+    except Exception:
+        pass
+    return False
 
 
 def run_monitor():
-    pl_now = get_poland_time()
-    log("🚀 Ініціалізація KPUW Slot Monitor...")
-    log(f"🔑 Bot Token довжина: {len(TELEGRAM_BOT_TOKEN)} символів (початок: {TELEGRAM_BOT_TOKEN[:6]}...)")
-    log(f"👥 Список отримувачів: {CHAT_IDS}")
-    log(f"🕒 Час у Польщі: {pl_now.strftime('%H:%M:%S')} ({pl_now.strftime('%A')})")
+    log("🚀 Запуск ЛОКАЛЬНОГО моніторингу черги KPUW Bydgoszcz...")
+    log(f"👥 Отримувачі сповіщень у Telegram: {CHAT_IDS}")
+    log(f"🔗 Сторінка: {TARGET_URL}")
+    log(f"⏱️ Інтервал опитування: {CHECK_INTERVAL_SECONDS} секунд")
 
-    is_outside_working_hours = (pl_now.weekday() >= 5) or (pl_now.hour < 8 or pl_now.hour >= 17)
-
-    if is_outside_working_hours:
-        log("🌙 Зараз неробочий час у Польщі (робочий графік: Пн-Пт 08:00–17:00).")
-        log("🧪 Виконуємо 1 разову тестову перевірку сайту KPUW для діагностики...")
-
-        site_status = "невідомо"
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
-            )
-            page = browser.new_page()
-            try:
-                page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=30000)
-                log(f"Сторінка відкрилась: '{page.title()}', URL: {page.url}")
-
-                # Очікуємо появи карток (до 20 сек для повільного з'єднання)
-                page.wait_for_selector(".select-card", timeout=20000)
-                card = page.locator(".select-card", has_text="Odciski palców")
-                found = card.count() > 0
-                log(f"Тест сайту: знайдено картку 'Odciski palców' = {found}")
-                site_status = "✅ Сайт KPUW доступний, картка черги знайдена"
-            except Exception as e:
-                log(f"Тест сайту: помилка = {e}")
-                log(f"Заголовок: '{page.title()}', текст: {page.inner_text('body')[:200] if page else 'немає'}")
-                site_status = f"⚠️ Помилка завантаження: {e}"
-            finally:
-                browser.close()
-
-        test_msg = (
-            "🧪 *[KPUW Monitor] Діагностичне сповіщення*\n\n"
-            f"{site_status}\n"
-            f"🕒 Поточний польський час: `{pl_now.strftime('%H:%M')}`\n\n"
-            "⏰ *Автоматичний моніторинг черги увімкнеться за розкладом о 08:00 ранку!*"
-        )
-        send_telegram_message(test_msg)
-        log("🏁 Тестова перевірка завершена.")
-        return
-
-    # Робочий час (08:00 - 17:00)
     startup_msg = (
-        "🟢 *[KPUW Monitor] Моніторинг черги розпочато!*\n\n"
+        "🟢 *[KPUW Monitor] Локальний моніторинг запущено на комп'ютері!*\n\n"
         "🏛 *Ужонд:* KPUW Bydgoszcz (Odciski palców)\n"
-        f"🕒 Польський час: `{pl_now.strftime('%H:%M')}` (робота до 17:00)\n"
-        f"⏱️ Інтервал: кожні {CHECK_INTERVAL_SECONDS} сек.\n\n"
-        "Як тільки з'явиться віконце — сюди миттєво надійде посилання!"
+        f"⏱️ Інтервал: кожні {CHECK_INTERVAL_SECONDS} сек.\n"
+        f"👥 Сповіщення отримують: `{len(CHAT_IDS)}` акаунтів.\n\n"
+        "Щойно з'являться вільні дні або вискочить вікно капчі — сюди миттєво прилетить тривожне сповіщення!"
     )
     send_telegram_message(startup_msg)
 
     detected_days = []
-    last_alerted_days = None
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -153,33 +135,22 @@ def run_monitor():
                     days = data.get("availableDays", [])
                     if days:
                         detected_days = days
-                        log(f"📩 Сервер повернув вільні дати: {days}")
+                        log(f"📩 Сервер повернув дні: {days}")
                     else:
                         detected_days = []
                 except Exception as e:
-                    log(f"Не вдалося розпарсити відповідь від сервера: {e}")
+                    log(f"Помилка парсингу JSON відповіді: {e}")
 
         page.on("response", handle_response)
 
         check_count = 0
         while True:
-            current_pl = get_poland_time()
-            if current_pl.hour >= 17 or current_pl.hour < 8:
-                log(f"⏹️ Настав час завершення ({current_pl.strftime('%H:%M')} PL). Зупинка скрипта до 08:00.")
-                stop_msg = (
-                    "🔴 *[KPUW Monitor] Робочий день завершено.*\n\n"
-                    f"🕒 Польський час: `{current_pl.strftime('%H:%M')}`.\n"
-                    "Скрипт вимикається до 08:00 наступного робочого дня."
-                )
-                send_telegram_message(stop_msg)
-                break
-
             check_count += 1
             detected_days = []
             log(f"--- Перевірка #{check_count} ---")
             try:
-                page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_selector(".select-card", timeout=15000)
+                page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=25000)
+                page.wait_for_selector(".select-card", timeout=12000)
 
                 card = page.locator(".select-card", has_text="Odciski palców")
                 if card.count() > 0:
@@ -188,19 +159,26 @@ def run_monitor():
                 else:
                     log("⚠️ Картку 'Odciski palców' не знайдено.")
 
+                # Сигнал 1: У відповіді API повернулися конкретні вільні дні
                 if detected_days:
-                    log(f"🔥 ЗНАЙДЕНО ВІЛЬНІ МІСЦЯ: {detected_days}")
-                    if detected_days != last_alerted_days:
-                        send_telegram_alert(detected_days)
-                        last_alerted_days = detected_days
-                    else:
-                        log("ℹ️ Сповіщення про ці дати вже надсилалося.")
-                    time.sleep(120)
-                else:
-                    log("⚪ Вільних місць наразі немає.")
+                    log(f"🔥 ЗНАЙДЕНО ВІЛЬНІ ДНІ: {detected_days}")
+                    send_slot_alert(f"Знайдено вільні дні: `{', '.join(str(d) for d in detected_days)}`")
+                    log("💤 Пауза 3 хвилини після знахідки для спокійного бронювання...")
+                    time.sleep(180)
+                    continue
+
+                # Сигнал 2: Вискочило вікно капчі (reCAPTCHA puzzle / challenge)
+                if is_captcha_triggered(page):
+                    log("🔥 СПРАЦЮВАЛА КАПЧА! Це означає появу вільних слотів!")
+                    send_slot_alert("На сайті з'явилося вікно капчі! Ймовірно, викинуто слоти.")
+                    log("💤 Пауза 3 хвилини для вирішення капчі та бронювання...")
+                    time.sleep(180)
+                    continue
+
+                log("⚪ Наразі вільних віконець немає (капча не спрацювала).")
 
             except Exception as err:
-                log(f"⚠️ Помилка під час перевірки: {err}")
+                log(f"⚠️ Помилка перевірки: {err}")
 
             log(f"💤 Очікування {CHECK_INTERVAL_SECONDS} сек...\n")
             time.sleep(CHECK_INTERVAL_SECONDS)
@@ -210,4 +188,4 @@ if __name__ == "__main__":
     try:
         run_monitor()
     except KeyboardInterrupt:
-        print("\n[!] Моніторинг зупинено.")
+        print("\n[!] Моніторинг зупинено користувачем.")

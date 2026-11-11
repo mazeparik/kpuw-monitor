@@ -2,11 +2,6 @@ name: KPUW Slot Monitor
 
 on:
   workflow_dispatch:
-  schedule:
-    # 07:00 UTC = 08:00 ранку в Польщі (Пн-Пт)
-    - cron: '0 7 * * 1-5'
-    # 11:00 UTC = 12:00 дня в Польщі (Пн-Пт)
-    - cron: '0 11 * * 1-5'
 
 jobs:
   monitor:
